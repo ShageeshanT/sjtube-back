@@ -3,13 +3,15 @@ SJ Tube — FastAPI Backend
 ─────────────────────────
 Wraps the existing youtube_downloader.py (sjtube.py) to provide
 a REST API for the React frontend.
+
+Files are downloaded temporarily, served to the browser, then
+auto-deleted after 5 minutes to prevent disk usage.
 """
 
 from __future__ import annotations
 
 import os
 import uuid
-import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -20,7 +22,6 @@ import yt_dlp
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 
 from models import (
     ValidateRequest,
@@ -38,7 +39,6 @@ from youtube_downloader import (
     SubtitleSettings,
     ThumbnailSettings,
     build_ydl_opts,
-    looks_like_youtube_url,
     is_playlist_url,
 )
 
@@ -47,6 +47,7 @@ from youtube_downloader import (
 # Config
 # ──────────────────────────────────────────────
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
+AUTO_DELETE_SECONDS = int(os.getenv("AUTO_DELETE_SECONDS", "300"))  # 5 min default
 Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
@@ -73,6 +74,10 @@ executor = ThreadPoolExecutor(max_workers=3)
 # In-memory task tracker: task_id → TaskProgress
 tasks: dict[str, dict[str, Any]] = {}
 tasks_lock = threading.Lock()
+
+# In-memory download history (persists across requests, resets on server restart)
+download_history: list[dict[str, Any]] = []
+history_lock = threading.Lock()
 
 
 # ──────────────────────────────────────────────
@@ -101,6 +106,36 @@ def _get_task(task_id: str) -> dict[str, Any]:
 def _set_task(task_id: str, data: dict[str, Any]) -> None:
     with tasks_lock:
         tasks[task_id] = data
+
+
+def _add_to_history(filename: str, size: int) -> None:
+    """Add a download record to in-memory history."""
+    with history_lock:
+        download_history.insert(0, {
+            "filename": filename,
+            "size": size,
+            "size_human": _fmt_bytes(size),
+            "modified": datetime.now(timezone.utc).isoformat(),
+        })
+        # Keep only last 100 entries
+        if len(download_history) > 100:
+            download_history.pop()
+
+
+def _schedule_delete(filepath: Path, delay: int = AUTO_DELETE_SECONDS) -> None:
+    """Delete a file after a delay (runs in background thread)."""
+    def _delete():
+        import time
+        time.sleep(delay)
+        try:
+            if filepath.exists():
+                filepath.unlink()
+                print(f"[cleanup] Auto-deleted: {filepath.name}")
+        except Exception as e:
+            print(f"[cleanup] Failed to delete {filepath.name}: {e}")
+
+    t = threading.Thread(target=_delete, daemon=True)
+    t.start()
 
 
 # ──────────────────────────────────────────────
@@ -236,6 +271,12 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
             "720p": "720",
             "480": "480",
             "480p": "480",
+            "360": "360",
+            "360p": "360",
+            "270": "270",
+            "270p": "270",
+            "144": "144",
+            "144p": "144",
         }
         quality = quality_map.get(req.quality, "best")
 
@@ -254,7 +295,6 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
         )
 
         # Build yt-dlp options using the original script's function
-        # We need a dummy progress printer, but we'll override the progress hooks
         from youtube_downloader import ProgressPrinter
         dummy_progress = ProgressPrinter()
         ydl_opts = build_ydl_opts(dl_req, dummy_progress)
@@ -262,9 +302,9 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
         # Override progress hooks with our own task-aware hook
         ydl_opts["progress_hooks"] = [lambda d: _progress_hook(task_id, d)]
 
-        # Also handle 480p quality
-        if quality == "480":
-            ydl_opts["format"] = "bestvideo[height<=480]+bestaudio/best"
+        # Handle lower qualities
+        if quality in ("144", "270", "360", "480"):
+            ydl_opts["format"] = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([req.url])
@@ -272,7 +312,16 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
         # Find the most recently created file in the download directory
         download_path = Path(save_dir)
         files = sorted(download_path.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
-        latest_file = files[0].name if files else None
+
+        latest_file = None
+        file_size = 0
+        if files:
+            latest_file = files[0].name
+            file_size = files[0].stat().st_size
+            # Add to history
+            _add_to_history(latest_file, file_size)
+            # Schedule auto-delete after 5 minutes
+            _schedule_delete(files[0])
 
         _set_task(task_id, {
             "status": "done",
@@ -326,49 +375,44 @@ async def get_status(task_id: str):
 
 
 # ──────────────────────────────────────────────
-# GET /api/history — list downloaded files
+# GET /api/history — in-memory download history
 # ──────────────────────────────────────────────
 @app.get("/api/history", response_model=list[HistoryItem])
 async def get_history():
-    download_path = Path(DOWNLOAD_DIR).resolve()
-    if not download_path.exists():
-        return []
-
-    items: list[HistoryItem] = []
-    for f in sorted(download_path.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if f.is_file() and not f.name.startswith("."):
-            stat = f.stat()
-            items.append(HistoryItem(
-                filename=f.name,
-                size=stat.st_size,
-                size_human=_fmt_bytes(stat.st_size),
-                modified=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                download_url=f"/downloads/{f.name}",
-            ))
-
-    return items
+    with history_lock:
+        return [
+            HistoryItem(
+                filename=h["filename"],
+                size=h["size"],
+                size_human=h["size_human"],
+                modified=h["modified"],
+                download_url=f"/downloads/{h['filename']}",
+            )
+            for h in download_history
+        ]
 
 
 # ──────────────────────────────────────────────
-# DELETE /api/history/{filename} — delete file
+# DELETE /api/history/{filename} — remove from history
 # ──────────────────────────────────────────────
 @app.delete("/api/history/{filename}")
 async def delete_file(filename: str):
-    file_path = (Path(DOWNLOAD_DIR).resolve() / filename).resolve()
+    # Remove from in-memory history
+    with history_lock:
+        download_history[:] = [h for h in download_history if h["filename"] != filename]
 
-    # Security: ensure the file is within the download directory
+    # Also delete the file if it still exists
+    file_path = (Path(DOWNLOAD_DIR).resolve() / filename).resolve()
     if not str(file_path).startswith(str(Path(DOWNLOAD_DIR).resolve())):
         raise HTTPException(status_code=403, detail="Access denied")
+    if file_path.exists():
+        file_path.unlink()
 
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
-
-    file_path.unlink()
-    return {"message": f"Deleted {filename}"}
+    return {"message": f"Removed {filename}"}
 
 
 # ──────────────────────────────────────────────
-# GET /downloads/{filename} — serve files
+# GET /downloads/{filename} — serve file (if still on disk)
 # ──────────────────────────────────────────────
 @app.get("/downloads/{filename}")
 async def download_file(filename: str):
@@ -378,7 +422,7 @@ async def download_file(filename: str):
         raise HTTPException(status_code=403, detail="Access denied")
 
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="File not found")
+        raise HTTPException(status_code=410, detail="File has been auto-deleted. Please re-download.")
 
     return FileResponse(
         path=str(file_path),
