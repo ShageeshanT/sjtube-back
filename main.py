@@ -55,14 +55,13 @@ app = FastAPI(
     description="YouTube video/audio downloader API",
 )
 
-# CORS — allow frontend dev server
+# CORS — configurable for deployment
+_default_origins = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
+_cors_origins = os.getenv("CORS_ORIGINS", _default_origins).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-    ],
+    allow_origins=[o.strip() for o in _cors_origins],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
