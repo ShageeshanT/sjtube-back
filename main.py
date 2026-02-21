@@ -311,9 +311,19 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
         if Path(COOKIES_FILE).exists():
             ydl_opts["cookiefile"] = str(Path(COOKIES_FILE).resolve())
 
-        # Handle lower qualities
-        if quality in ("144", "270", "360", "480"):
-            ydl_opts["format"] = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
+        # Override format with resilient fallback chains (fixes Shorts & uncommon videos)
+        if req.mode == "audio":
+            ydl_opts["format"] = "bestaudio/best"
+        elif quality in ("144", "270", "360", "480", "720", "1080"):
+            ydl_opts["format"] = (
+                f"bestvideo[height<={quality}]+bestaudio/"
+                f"best[height<={quality}]/"
+                f"bestvideo+bestaudio/"
+                f"best"
+            )
+        else:
+            # "best" quality
+            ydl_opts["format"] = "bestvideo+bestaudio/best"
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([req.url])
