@@ -1,0 +1,17 @@
+# Environment & secrets
+.env
+cookies.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Downloads (temp files)
+downloads/
+
+# OS
+.DS_Store
+Thumbs.db

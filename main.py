@@ -48,6 +48,7 @@ from youtube_downloader import (
 # ──────────────────────────────────────────────
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "./downloads")
 AUTO_DELETE_SECONDS = int(os.getenv("AUTO_DELETE_SECONDS", "300"))  # 5 min default
+COOKIES_FILE = os.getenv("COOKIES_FILE", "./cookies.txt")
 Path(DOWNLOAD_DIR).mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
@@ -153,6 +154,10 @@ async def validate_url(req: ValidateRequest):
         "skip_download": True,
         "extract_flat": "in_playlist" if is_playlist_url(url) else False,
     }
+
+    # Use cookies to bypass YouTube bot detection
+    if Path(COOKIES_FILE).exists():
+        ydl_opts["cookiefile"] = str(Path(COOKIES_FILE).resolve())
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -301,6 +306,10 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
 
         # Override progress hooks with our own task-aware hook
         ydl_opts["progress_hooks"] = [lambda d: _progress_hook(task_id, d)]
+
+        # Use cookies to bypass YouTube bot detection
+        if Path(COOKIES_FILE).exists():
+            ydl_opts["cookiefile"] = str(Path(COOKIES_FILE).resolve())
 
         # Handle lower qualities
         if quality in ("144", "270", "360", "480"):
