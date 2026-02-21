@@ -311,19 +311,32 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
         if Path(COOKIES_FILE).exists():
             ydl_opts["cookiefile"] = str(Path(COOKIES_FILE).resolve())
 
-        # Override format with resilient fallback chains (fixes Shorts & uncommon videos)
+        # Check if ffmpeg is available
+        import shutil
+        has_ffmpeg = shutil.which("ffmpeg") is not None
+
+        # Override format with resilient fallback chains
         if req.mode == "audio":
             ydl_opts["format"] = "bestaudio/best"
-        elif quality in ("144", "270", "360", "480", "720", "1080"):
-            ydl_opts["format"] = (
-                f"bestvideo[height<={quality}]+bestaudio/"
-                f"best[height<={quality}]/"
-                f"bestvideo+bestaudio/"
-                f"best"
-            )
+        elif has_ffmpeg:
+            # With ffmpeg: can merge separate video+audio streams
+            if quality in ("144", "270", "360", "480", "720", "1080"):
+                ydl_opts["format"] = (
+                    f"bestvideo[height<={quality}]+bestaudio/"
+                    f"best[height<={quality}]/"
+                    f"best"
+                )
+            else:
+                ydl_opts["format"] = "bestvideo+bestaudio/best"
         else:
-            # "best" quality
-            ydl_opts["format"] = "bestvideo+bestaudio/best"
+            # Without ffmpeg: use single pre-merged streams only (no merging needed)
+            if quality in ("144", "270", "360", "480", "720", "1080"):
+                ydl_opts["format"] = f"best[height<={quality}]/best"
+            else:
+                ydl_opts["format"] = "best"
+            # Remove options that require ffmpeg
+            ydl_opts.pop("merge_output_format", None)
+            ydl_opts["postprocessors"] = []
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([req.url])
