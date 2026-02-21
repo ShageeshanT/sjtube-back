@@ -34,13 +34,7 @@ from models import (
 )
 
 # Import helpers from the original sjtube script
-from youtube_downloader import (
-    DownloadRequest,
-    SubtitleSettings,
-    ThumbnailSettings,
-    build_ydl_opts,
-    is_playlist_url,
-)
+from youtube_downloader import is_playlist_url
 
 
 # ──────────────────────────────────────────────
@@ -269,74 +263,60 @@ def _run_download_task(task_id: str, req: DownloadStartRequest) -> None:
 
         # Map quality string
         quality_map = {
-            "best": "best",
-            "1080": "1080",
-            "1080p": "1080",
-            "720": "720",
-            "720p": "720",
-            "480": "480",
-            "480p": "480",
-            "360": "360",
-            "360p": "360",
-            "270": "270",
-            "270p": "270",
-            "144": "144",
-            "144p": "144",
+            "best": "best", "1080": "1080", "1080p": "1080",
+            "720": "720", "720p": "720", "480": "480", "480p": "480",
+            "360": "360", "360p": "360", "270": "270", "270p": "270",
+            "144": "144", "144p": "144",
         }
         quality = quality_map.get(req.quality, "best")
 
-        # Build a DownloadRequest from the original script
-        dl_req = DownloadRequest(
-            url=req.url,
-            save_dir=save_dir,
-            kind="playlist" if is_pl else "video",
-            mode=req.mode,
-            quality=quality,
-            audio_format=req.audio_format if req.mode == "audio" else "m4a",
-            use_deno=True,
-            embed_metadata=True,
-            subtitles=SubtitleSettings(),
-            thumbnails=ThumbnailSettings(),
-        )
-
-        # Build yt-dlp options using the original script's function
-        from youtube_downloader import ProgressPrinter
-        dummy_progress = ProgressPrinter()
-        ydl_opts = build_ydl_opts(dl_req, dummy_progress)
-
-        # Override progress hooks with our own task-aware hook
-        ydl_opts["progress_hooks"] = [lambda d: _progress_hook(task_id, d)]
-
-        # Use cookies to bypass YouTube bot detection
-        if Path(COOKIES_FILE).exists():
-            ydl_opts["cookiefile"] = str(Path(COOKIES_FILE).resolve())
-
-        # Check if ffmpeg is available
+        # Build clean yt-dlp options from scratch (no build_ydl_opts)
         import shutil
         has_ffmpeg = shutil.which("ffmpeg") is not None
 
-        # Override format with resilient fallback chains
+        # Format selection
         if req.mode == "audio":
-            ydl_opts["format"] = "bestaudio/best"
+            fmt = "bestaudio/best"
+        elif has_ffmpeg and quality in ("144", "270", "360", "480", "720", "1080"):
+            fmt = f"bestvideo[height<={quality}]+bestaudio/best[height<={quality}]/best"
         elif has_ffmpeg:
-            # With ffmpeg: can merge separate video+audio streams
-            if quality in ("144", "270", "360", "480", "720", "1080"):
-                ydl_opts["format"] = (
-                    f"bestvideo[height<={quality}]+bestaudio/"
-                    f"best[height<={quality}]/"
-                    f"best"
-                )
-            else:
-                ydl_opts["format"] = "bestvideo+bestaudio/best"
+            fmt = "bestvideo+bestaudio/best"
+        elif quality in ("144", "270", "360", "480", "720", "1080"):
+            fmt = f"best[height<={quality}]/best"
         else:
-            # Without ffmpeg: use single pre-merged streams only (no merging needed)
-            if quality in ("144", "270", "360", "480", "720", "1080"):
-                ydl_opts["format"] = f"best[height<={quality}]/best"
-            else:
-                ydl_opts["format"] = "best"
-            # Remove options that require ffmpeg
-            ydl_opts.pop("merge_output_format", None)
-            ydl_opts["postprocessors"] = []
+            fmt = "best"
+
+        # Output template
+        outtmpl = os.path.join(save_dir, "%(title)s.%(ext)s")
+
+        ydl_opts: dict[str, Any] = {
+            "format": fmt,
+            "outtmpl": outtmpl,
+            "noplaylist": not is_pl,
+            "restrictfilenames": True,
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreerrors": True,
+            "retries": 10,
+            "fragment_retries": 10,
+            "progress_hooks": [lambda d: _progress_hook(task_id, d)],
+        }
+
+        # Only add merge format if ffmpeg exists
+        if has_ffmpeg:
+            ydl_opts["merge_output_format"] = "mp4"
+            # Audio extraction postprocessor
+            if req.mode == "audio":
+                codec = "mp3" if req.audio_format == "mp3" else "m4a"
+                ydl_opts["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": codec,
+                    "preferredquality": "192",
+                }]
+
+        # Cookies for YouTube bot bypass
+        if Path(COOKIES_FILE).exists():
+            ydl_opts["cookiefile"] = str(Path(COOKIES_FILE).resolve())
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([req.url])
