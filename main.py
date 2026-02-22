@@ -134,6 +134,27 @@ def _schedule_delete(filepath: Path, delay: int = AUTO_DELETE_SECONDS) -> None:
 
 
 # ──────────────────────────────────────────────
+# GET /api/debug — server diagnostics
+# ──────────────────────────────────────────────
+@app.get("/api/debug")
+async def debug_info():
+    """Return server environment info for troubleshooting."""
+    import shutil
+    import sys
+    ytdlp_version = getattr(yt_dlp, "version", None)
+    version_str = getattr(ytdlp_version, "__version__", "unknown") if ytdlp_version else "unknown"
+    return {
+        "yt_dlp_version": version_str,
+        "python_version": sys.version,
+        "ffmpeg_available": shutil.which("ffmpeg") is not None,
+        "ffmpeg_path": shutil.which("ffmpeg"),
+        "cookies_file_exists": Path(COOKIES_FILE).exists(),
+        "cookies_file_path": str(Path(COOKIES_FILE).resolve()),
+        "download_dir": DOWNLOAD_DIR,
+    }
+
+
+# ──────────────────────────────────────────────
 # POST /api/validate — extract video metadata
 # ──────────────────────────────────────────────
 @app.post("/api/validate", response_model=ValidateResponse)
@@ -146,6 +167,7 @@ async def validate_url(req: ValidateRequest):
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
+        "format": "best",
         "extract_flat": "in_playlist" if is_playlist_url(url) else False,
     }
 
