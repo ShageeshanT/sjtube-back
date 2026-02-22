@@ -167,7 +167,7 @@ async def validate_url(req: ValidateRequest):
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format": "best",
+        "ignore_no_formats_error": True,
         "extract_flat": "in_playlist" if is_playlist_url(url) else False,
     }
 
