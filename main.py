@@ -52,15 +52,17 @@ app = FastAPI(
 )
 
 # CORS — configurable for deployment
-_default_origins = "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000"
-_cors_origins = os.getenv("CORS_ORIGINS", _default_origins).split(",")
+_default_origins = "*"
+_cors_origins_raw = os.getenv("CORS_ORIGINS", _default_origins).split(",")
+_cors_origins = [o.strip() for o in _cors_origins_raw]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _cors_origins],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # Thread pool for background downloads
